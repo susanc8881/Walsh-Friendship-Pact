@@ -1,0 +1,371 @@
+import React, { useMemo, useRef, useState, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Check, ChevronRight, RefreshCw, Send, Users, Copy } from "lucide-react";
+
+// ---- Utilities ----
+const uuid = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const LS_KEY = "walshFriendshipPactResponses_v1";
+
+function saveSubmission(submission) {
+  const all = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
+  all.push(submission);
+  localStorage.setItem(LS_KEY, JSON.stringify(all));
+}
+
+function loadSubmissions() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function similarityScore(a, b) {
+  // simple matching: +1 for each identical answer, 0 otherwise. Scale to 0–100
+  let same = 0;
+  let total = Math.max(a.answers.length, b.answers.length);
+  for (let i = 0; i < total; i++) {
+    if (a.answers[i] != null && b.answers[i] != null && a.answers[i] === b.answers[i]) same++;
+  }
+  return Math.round((same / total) * 100);
+}
+
+// ---- Data ----
+const QUESTIONS = [
+  { q: "What kind of hangouts do you enjoy most?", options: ["Game night", "Coffee chat", "Workout buddy", "Study sesh", "Movie night"] },
+  { q: "Ideal weekend vibe?", options: ["Exploring Boston", "Chill in", "Campus events", "Volunteering", "Sports games"] },
+  { q: "Preferred communication style?", options: ["Texting", "Calling", "In‑person", "Group chat", "Memes only"] },
+  { q: "Morning or night person?", options: ["Early bird", "Night owl", "Depends"] },
+  { q: "Cleanliness in shared spaces?", options: ["Tidy always", "Reasonably neat", "Organized chaos"] },
+  { q: "Noise tolerance?", options: ["Very quiet", "Moderate", "Lively"] },
+  { q: "Workout preference?", options: ["Weights", "Cardio", "Classes", "Outdoors", "Not my thing"] },
+  { q: "Faith/Reflection activities?", options: ["Attend services", "Open to join", "Not really my thing"] },
+  { q: "Clubs you’re into?", options: ["Cultural orgs", "Service", "Arts & media", "STEM", "Business & consulting"] },
+  { q: "Study location?", options: ["Library", "Dorm", "Cafe", "Outdoors"] },
+  { q: "Room social level?", options: ["Open door often", "Sometimes", "Closed door mostly"] },
+  { q: "How spontaneous are you?", options: ["Very", "Somewhat", "Planner"] },
+  { q: "Favorite BC tradition?", options: ["Mod stock", "Beanpot", "Marathon Monday", "Red bandana day"] },
+  { q: "Dietary vibe for outings?", options: ["Anything", "Vegetarian", "Vegan", "Gluten‑free"] },
+  { q: "How do you unwind?", options: ["Music", "Streaming", "Reading", "Gym", "Crafts"] },
+  { q: "Group size preference?", options: ["1‑2 close friends", "Small group", "The more the merrier"] },
+  { q: "Pet tolerance (visits, pics, convos)?", options: ["Love them", "Like them", "Not into it"] },
+  { q: "Sports engagement?", options: ["Watch", "Play", "Both", "Neither"] },
+  { q: "Messaged response time?", options: ["Right away", "Within a few hours", "When I can"] },
+  { q: "Music taste match importance?", options: ["Very important", "Nice to have", "Doesn’t matter"] },
+];
+
+// ---- Components ----
+function ProgressBar({ value }) {
+  return (
+    <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+      <div
+        className="h-full bg-indigo-500 transition-all"
+        style={{ width: `${value}%` }}
+      />
+    </div>
+  );
+}
+
+function QuestionCard({ index, data, value, onSelect, dimmed }) {
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -16 }}
+      className={`rounded-2xl shadow-sm border p-5 md:p-6 bg-white ${dimmed ? "opacity-40" : ""}`}
+    >
+      <div className="flex items-start gap-3">
+        <div className="shrink-0 mt-1 flex h-7 w-7 items-center justify-center rounded-full bg-indigo-600 text-white text-sm">
+          {index + 1}
+        </div>
+        <div className="w-full">
+          <h3 className="text-lg md:text-xl font-semibold mb-4">{data.q}</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {data.options.map((opt, i) => (
+              <button
+                key={i}
+                onClick={() => onSelect(i)}
+                disabled={value !== null && value !== undefined}
+                className={`text-left border rounded-xl px-4 py-3 hover:shadow-sm transition focus:outline-none focus:ring-2 focus:ring-indigo-500 flex items-center justify-between ${
+                  value === i ? "border-indigo-500 ring-1 ring-indigo-500" : "border-gray-200"
+                } ${value != null ? "pointer-events-none" : ""}`}
+                aria-pressed={value === i}
+              >
+                <span className="pr-4">{opt}</span>
+                {value === i && <Check className="h-5 w-5" />}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+export default function WalshFriendshipPact() {
+  const [answers, setAnswers] = useState(Array(QUESTIONS.length).fill(null));
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(null); // the saved submission object
+  const [bestMatch, setBestMatch] = useState(null);
+  const cardRefs = useRef(QUESTIONS.map(() => React.createRef()));
+
+  const completeCount = useMemo(() => answers.filter((a) => a != null).length, [answers]);
+  const progress = Math.round((completeCount / QUESTIONS.length) * 100);
+
+  useEffect(() => {
+    // Auto-focus/scroll to first unanswered
+    const nextIdx = answers.findIndex((a) => a == null);
+    if (nextIdx >= 0) {
+      cardRefs.current[nextIdx]?.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, []);
+
+  const handleSelect = (qIndex, optionIndex) => {
+    setAnswers((prev) => {
+      const copy = [...prev];
+      copy[qIndex] = optionIndex;
+      return copy;
+    });
+
+    // Auto-scroll to next
+    const next = qIndex + 1;
+    const targetIdx = next < QUESTIONS.length ? next : qIndex;
+    setTimeout(() => {
+      cardRefs.current[targetIdx]?.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
+  };
+
+  const reset = () => {
+    setAnswers(Array(QUESTIONS.length).fill(null));
+    setSubmitted(null);
+    setBestMatch(null);
+    setName("");
+    setEmail("");
+    cardRefs.current[0]?.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const allAnswered = completeCount === QUESTIONS.length;
+
+  const handleSubmit = async () => {
+    if (!allAnswered) return;
+    setSubmitting(true);
+    try {
+      const submission = {
+        id: uuid(),
+        name: name.trim() || "Anonymous Eagle",
+        email: email.trim() || null,
+        answers: [...answers],
+        createdAt: new Date().toISOString(),
+      };
+
+      // Save locally (demo). Replace with a POST to your backend if desired.
+      saveSubmission(submission);
+
+      // Compute best match from existing submissions (excluding self)
+      const all = loadSubmissions().filter((s) => s.id !== submission.id);
+      let best = null;
+      for (const other of all) {
+        const score = similarityScore(submission, other);
+        if (!best || score > best.score) best = { person: other, score };
+      }
+
+      setSubmitted(submission);
+      setBestMatch(best);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const firstUnanswered = answers.findIndex((a) => a == null);
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-indigo-50 to-white">
+      {/* Header */}
+      <header className="sticky top-0 z-50 backdrop-blur bg-white/75 border-b">
+        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-4">
+          <Users className="h-6 w-6" />
+          <div className="flex-1">
+            <div className="flex items-center gap-4">
+              <h1 className="text-lg font-semibold">Walsh Friendship Pact</h1>
+              <span className="text-sm text-gray-500">{completeCount}/{QUESTIONS.length} answered</span>
+            </div>
+            <div className="mt-2">
+              <ProgressBar value={progress} />
+            </div>
+          </div>
+          <button
+            onClick={reset}
+            className="hidden sm:inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+            title="Start over"
+          >
+            <RefreshCw className="h-4 w-4" /> Reset
+          </button>
+        </div>
+      </header>
+
+      {/* Intro */}
+      <section className="max-w-3xl mx-auto px-4 py-6 md:py-10">
+        <div className="rounded-2xl border p-5 md:p-6 bg-white shadow-sm">
+          <h2 className="text-2xl md:text-3xl font-bold mb-2">Find your best‑match neighbor in Walsh 🦅</h2>
+          <p className="text-gray-600 mb-4">
+            Answer 20 quick questions. Each answer will fade and we’ll auto‑scroll you to the next one. At the end, we’ll compare your answers to past submissions (saved in your browser for this demo) and show your closest match.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <input
+              className="border rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Your name (optional)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <input
+              className="border rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="BC email (optional)"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* Questions */}
+      <main className="max-w-3xl mx-auto px-4 pb-24 space-y-4">
+        {QUESTIONS.map((q, idx) => (
+          <div ref={cardRefs.current[idx]} key={idx}>
+            <QuestionCard
+              index={idx}
+              data={q}
+              value={answers[idx]}
+              dimmed={answers[idx] != null}
+              onSelect={(opt) => handleSelect(idx, opt)}
+            />
+          </div>
+        ))}
+
+        {/* Submit / Review */}
+        <div className="rounded-2xl border p-5 md:p-6 bg-white shadow-sm">
+          <div className="flex items-start gap-4">
+            <div className="mt-1">
+              <Send className="h-6 w-6" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-xl font-semibold mb-2">Review & Submit</h3>
+              {!allAnswered && (
+                <p className="text-gray-600 mb-4">
+                  You still have {QUESTIONS.length - completeCount} question{QUESTIONS.length - completeCount === 1 ? "" : "s"} left. {firstUnanswered >= 0 && (
+                    <button
+                      className="underline text-indigo-600"
+                      onClick={() => cardRefs.current[firstUnanswered]?.current?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                    >
+                      Jump to next
+                    </button>
+                  )}
+                </p>
+              )}
+
+              {allAnswered && !submitted && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={handleSubmit}
+                    disabled={submitting}
+                    className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 text-white px-4 py-2 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {submitting ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" /> Submitting
+                      </>
+                    ) : (
+                      <>
+                        Submit my answers <ChevronRight className="h-4 w-4" />
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={reset}
+                    className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 hover:bg-gray-50"
+                  >
+                    Clear answers
+                  </button>
+                </div>
+              )}
+
+              {submitted && (
+                <MatchResult submitted={submitted} bestMatch={bestMatch} />
+              )}
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t py-8 text-center text-sm text-gray-500">
+        <div className="max-w-3xl mx-auto px-4">
+          <p>
+            Demo storage is local to your browser. To make this live for all Walsh residents, plug in a backend (e.g., Supabase, Firebase, Airtable) at the save step.
+          </p>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function MatchResult({ submitted, bestMatch }) {
+  const [copied, setCopied] = useState(false);
+  const share = useMemo(() => ({
+    id: submitted.id,
+    name: submitted.name,
+    createdAt: submitted.createdAt,
+  }), [submitted]);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(share, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {}
+  };
+
+  return (
+    <div className="mt-2">
+      <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-4">
+        <h4 className="font-semibold text-indigo-900 mb-1">You’re in! 🎉</h4>
+        <p className="text-indigo-900/80 text-sm">
+          Your answers were saved locally. Here’s your best match among prior submissions on this device.
+        </p>
+      </div>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div className="rounded-xl border p-4">
+          <h5 className="font-semibold mb-2">Your details</h5>
+          <ul className="text-sm text-gray-700 space-y-1">
+            <li><span className="font-medium">Name:</span> {submitted.name}</li>
+            {submitted.email && <li><span className="font-medium">Email:</span> {submitted.email}</li>}
+            <li><span className="font-medium">Submitted:</span> {new Date(submitted.createdAt).toLocaleString()}</li>
+            <li className="flex items-center gap-2 mt-2">
+              <button onClick={handleCopy} className="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-xs">
+                <Copy className="h-4 w-4" /> {copied ? "Copied!" : "Copy share code"}
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <div className="rounded-xl border p-4">
+          <h5 className="font-semibold mb-2">Best match (local demo)</h5>
+          {!bestMatch ? (
+            <p className="text-sm text-gray-600">No other submissions found yet. Ask a friend to take it on your device to see matching in action.</p>
+          ) : (
+            <div className="text-sm text-gray-800">
+              <p className="mb-1"><span className="font-medium">Name:</span> {bestMatch.person.name}</p>
+              {bestMatch.person.email && <p className="mb-1"><span className="font-medium">Email:</span> {bestMatch.person.email}</p>}
+              <p className="mb-1"><span className="font-medium">Compatibility:</span> {bestMatch.score}%</p>
+              <p className="text-xs text-gray-500">(Based on identical answers across questions.)</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
